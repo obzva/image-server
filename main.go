@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/obzva/image-server/server"
 )
@@ -12,9 +13,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	
+
+	port, ok := os.LookupEnv("PORT")
+	if !ok {
+		port = "3333"
+	}
+
 	s := server.NewServer(gcs)
-	if err := http.ListenAndServe(":3333", s); err != nil {
+	if err := http.ListenAndServe(":"+port, s); err != nil {
 		log.Fatal(err)
 	}
 }
