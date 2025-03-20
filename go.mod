@@ -3,6 +3,11 @@ module github.com/obzva/image-server
 go 1.24.1
 
 require (
+	cloud.google.com/go/storage v1.51.0
+	github.com/obzva/gato v0.1.0
+)
+
+require (
 	cel.dev/expr v0.19.2 // indirect
 	cloud.google.com/go v0.118.3 // indirect
 	cloud.google.com/go/auth v0.15.0 // indirect
@@ -10,7 +15,6 @@ require (
 	cloud.google.com/go/compute/metadata v0.6.0 // indirect
 	cloud.google.com/go/iam v1.4.1 // indirect
 	cloud.google.com/go/monitoring v1.24.0 // indirect
-	cloud.google.com/go/storage v1.51.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.25.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.51.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.51.0 // indirect
@@ -25,7 +29,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.5 // indirect
 	github.com/googleapis/gax-go/v2 v2.14.1 // indirect
-	github.com/obzva/gato v0.1.0 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.34.0 // indirect
