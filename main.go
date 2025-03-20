@@ -20,6 +20,7 @@ func main() {
 	}
 
 	s := server.NewServer(gcs)
+	log.Printf("listening on port %s", port)
 	if err := http.ListenAndServe(":"+port, s); err != nil {
 		log.Fatal(err)
 	}
