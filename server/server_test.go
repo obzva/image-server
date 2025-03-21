@@ -57,6 +57,8 @@ func TestGETImages(t *testing.T) {
 
 		stubServer.ServeHTTP(response, request)
 
+		assertResponseStatusCode(t, response.Result().StatusCode, http.StatusOK)
+
 		assertBytes(t, response.Body.Bytes(), stubJPEG)
 	})
 
@@ -87,12 +89,16 @@ func TestGETImages(t *testing.T) {
 
 		stubServer.ServeHTTP(response, request)
 
+		assertResponseStatusCode(t, response.Result().StatusCode, http.StatusOK)
+
 		assertImageSize(t, response.Body.Bytes(), struct{ w, h int }{d, d})
 
 		request = newGetImageRequest("norwich-terrier.jpg", fmt.Sprintf("h=%d", d))
 		response = httptest.NewRecorder()
 
 		stubServer.ServeHTTP(response, request)
+
+		assertResponseStatusCode(t, response.Result().StatusCode, http.StatusOK)
 
 		assertImageSize(t, response.Body.Bytes(), struct{ w, h int }{d, d})
 	})
@@ -103,6 +109,8 @@ func TestGETImages(t *testing.T) {
 		response := httptest.NewRecorder()
 
 		stubServer.ServeHTTP(response, request)
+
+		assertResponseStatusCode(t, response.Result().StatusCode, http.StatusOK)
 
 		got := response.Header().Get("Content-Type")
 		want := "image/jpeg"
@@ -116,17 +124,71 @@ func TestGETImages(t *testing.T) {
 
 		stubServer.ServeHTTP(response, request)
 
+		assertResponseStatusCode(t, response.Result().StatusCode, http.StatusOK)
+
 		got := response.Header().Get("Content-Type")
 		want := "image/png"
 
 		assertString(t, got, want)
+	})
+
+	// save tests
+	t.Run("save result image to storage", func(t *testing.T) {
+		stubJPEG := newStubJPEG()
+		stubJPEGReader := newStubImageReader(stubJPEG)
+		stubStore := &stubImageStorage{
+			images: map[string]io.ReadCloser{
+				"norwich-terrier.jpg": stubJPEGReader,
+			},
+		}
+		stubServer := NewServer(stubStore)
+
+		d := 200
+		request := newGetImageRequest("norwich-terrier.jpg", fmt.Sprintf("w=%d", d))
+		response := httptest.NewRecorder()
+
+		stubServer.ServeHTTP(response, request)
+
+		assertResponseStatusCode(t, response.Result().StatusCode, http.StatusOK)
+
+		if _, ok := stubStore.images[fmt.Sprintf("processed/norwich-terrier-w%d-h%d.jpg", d, 0)]; !ok {
+			keys := ""
+			for k := range stubStore.images {
+				keys += k + ", "
+			}
+			t.Errorf("result image is not saved to storage, got keys: %s", keys)
+		}
+	})
+
+	t.Run("use processed image when it exists", func(t *testing.T) {
+		d := 200
+		stubJPEG := newStubJPEG()
+		stubJPEGReader := newStubImageReader(stubJPEG)
+		stubStore := &stubImageStorage{
+			images: map[string]io.ReadCloser{
+				fmt.Sprintf("processed/norwich-terrier-w%d-h%d.jpg", d, 0): stubJPEGReader,
+			},
+		}
+		stubServer := NewServer(stubStore)
+		for k := range stubStore.images {
+			fmt.Println("key", k)
+		}
+
+		request := newGetImageRequest("norwich-terrier.jpg", fmt.Sprintf("w=%d", d))
+		response := httptest.NewRecorder()
+
+		stubServer.ServeHTTP(response, request)
+
+		assertResponseStatusCode(t, response.Result().StatusCode, http.StatusOK)
+		assertInt(t, stubStore.saveCount, 0)
 	})
 }
 
 // Stub helpers
 
 type stubImageStorage struct {
-	images map[string]io.ReadCloser
+	images    map[string]io.ReadCloser
+	saveCount int // number of times SaveImage was called
 }
 
 func (s *stubImageStorage) GetImageReader(ctx context.Context, name string) (io.ReadCloser, error) {
@@ -135,6 +197,13 @@ func (s *stubImageStorage) GetImageReader(ctx context.Context, name string) (io.
 		return nil, storage.ErrObjectNotExist
 	}
 	return imgData, nil
+}
+
+func (s *stubImageStorage) SaveImage(ctx context.Context, name string, img *image.RGBA) error {
+	s.images[name] = newStubImageReader(newStubJPEG())
+	s.saveCount = s.saveCount + 1
+	fmt.Println("saveCount", s.saveCount)
+	return nil
 }
 
 type stubImageReader struct {
@@ -209,5 +278,12 @@ func assertString(t testing.TB, got, want string) {
 	t.Helper()
 	if got != want {
 		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func assertInt(t testing.TB, got, want int) {
+	t.Helper()
+	if got != want {
+		t.Errorf("got %d, want %d", got, want)
 	}
 }

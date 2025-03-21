@@ -4,15 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"image/jpeg"
 	"image/png"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/obzva/gato"
@@ -20,6 +21,7 @@ import (
 
 type ImageStorage interface {
 	GetImageReader(ctx context.Context, name string) (io.ReadCloser, error)
+	SaveImage(ctx context.Context, name string, img *image.RGBA) error
 }
 
 type Server struct {
@@ -30,47 +32,18 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	// validate image name and extract format
 	imgName := strings.TrimPrefix(r.URL.Path, "/images/")
 
-	re, err := regexp.Compile(`^(.+)\.([^.]+)$`)
+	imgNamePart, imgFormatPart, err := splitImageName(imgName)
 	if err != nil {
-		log.Fatal(err)
-	}
-
-	matches := re.FindStringSubmatch(imgName)
-	if len(matches) != 3 {
-		http.Error(rw, "invalid image name", http.StatusBadRequest)
+		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	imgFormat := matches[2]
-	if imgFormat == "jpg" {
-		imgFormat = "jpeg"
-	}
-	if imgFormat != "jpeg" && imgFormat != "png" {
+	if imgFormatPart != "jpg" && imgFormatPart != "jpeg" && imgFormatPart != "png" {
 		http.Error(rw, "invalid image format", http.StatusBadRequest)
 		return
 	}
 
-	// get image reader from storage
-	rc, err := s.storage.GetImageReader(r.Context(), imgName)
-	if err != nil {
-		statusCode := http.StatusInternalServerError
-		if errors.Is(err, storage.ErrObjectNotExist) {
-			statusCode = http.StatusNotFound
-		}
-		http.Error(rw, err.Error(), statusCode)
-		return
-	}
-	defer rc.Close()
-
-	// create gato.Data
-	data, err := gato.NewData(imgName, rc)
-	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	srcImg := data.Image
-
-	// set w and h
+	// get w and h from query params
 	q := r.URL.Query()
 
 	w := 0
@@ -91,44 +64,80 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if w == 0 && h == 0 {
-		w = srcImg.Bounds().Dx()
-		h = srcImg.Bounds().Dy()
-	}
-
-	// create gato.Instruction
-	ist := gato.Instruction{
-		Width:         w,
-		Height:        h,
-		Interpolation: q.Get("m"),
-	}
-
-	// create gato.Processor
-	prc, err := gato.NewProcessor(ist)
-	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// process image
-	dstImg, err := prc.Process(data)
-	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// write response
-	switch imgFormat {
-	case "jpeg":
-		if err := jpeg.Encode(rw, dstImg, nil); err != nil {
-			http.Error(rw, "failed to write response", http.StatusInternalServerError)
+	// check if processed image exists
+	processedImgName := fmt.Sprintf("processed/%s-w%d-h%d.%s", imgNamePart, w, h, imgFormatPart)
+	rc, err := s.storage.GetImageReader(r.Context(), processedImgName)
+	switch {
+	case err == nil:
+		// if processed one exists, we can use this one
+		defer rc.Close()
+		if _, err := io.Copy(rw, rc); err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
 			return
 		}
-	case "png":
-		if err := png.Encode(rw, dstImg); err != nil {
-			http.Error(rw, "failed to write response", http.StatusInternalServerError)
+	case errors.Is(err, storage.ErrObjectNotExist):
+		// if processed one doesn't exist, we have to get original image from storage
+		rc, err = s.storage.GetImageReader(r.Context(), imgName)
+		if err != nil {
+			statusCode := http.StatusInternalServerError
+			if errors.Is(err, storage.ErrObjectNotExist) {
+				statusCode = http.StatusNotFound
+			}
+			http.Error(rw, err.Error(), statusCode)
 			return
 		}
+		defer rc.Close()
+		// create gato.Data
+		data, err := gato.NewData(imgName, rc)
+		if err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		srcImg := data.Image
+
+		// set w and h for gato.Instruction
+		if w == 0 && h == 0 {
+			w = srcImg.Bounds().Dx()
+			h = srcImg.Bounds().Dy()
+		}
+
+		// create gato.Instruction
+		ist := gato.Instruction{
+			Width:         w,
+			Height:        h,
+			Interpolation: q.Get("m"),
+		}
+
+		// create gato.Processor
+		prc, err := gato.NewProcessor(ist)
+		if err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// process image
+		dstImg, err := prc.Process(data)
+		if err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// if saveNewOne is true, save processed image to storage
+		saveName := fmt.Sprintf("processed/%s-w%d-h%d.%s", imgNamePart, w, h, imgFormatPart)
+		if err := s.storage.SaveImage(r.Context(), saveName, dstImg); err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// write response
+		if err := writeImage(rw, dstImg, imgFormatPart); err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+	default:
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
 	}
 }
 
@@ -140,7 +149,7 @@ type GoogleCloudStorage struct {
 	BucketName string
 }
 
-func (gcs *GoogleCloudStorage) GetImageReader(ctx context.Context, objName string) (io.ReadCloser, error) {
+func (gcs *GoogleCloudStorage) GetImageReader(ctx context.Context, name string) (io.ReadCloser, error) {
 	client, err := storage.NewClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage client: %w", err)
@@ -148,15 +157,43 @@ func (gcs *GoogleCloudStorage) GetImageReader(ctx context.Context, objName strin
 	defer client.Close()
 
 	bkt := client.Bucket(gcs.BucketName)
-	rc, err := bkt.Object(objName).NewReader(ctx)
+	rc, err := bkt.Object(name).NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, storage.ErrObjectNotExist
 		}
-		return nil, fmt.Errorf("failed to read image %s: %w", objName, err)
+		return nil, fmt.Errorf("failed to read image %s: %w", name, err)
 	}
 
 	return rc, nil
+}
+
+func (gcs *GoogleCloudStorage) SaveImage(ctx context.Context, name string, img *image.RGBA) error {
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to initialize storage client: %w", err)
+	}
+	defer client.Close()
+
+	_, imgFormat, err := splitImageName(name)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, time.Second*50)
+	defer cancel()
+
+	o := client.Bucket(gcs.BucketName).Object(name)
+	wc := o.If(storage.Conditions{DoesNotExist: true}).NewWriter(ctx)
+	if err := writeImage(wc, img, imgFormat); err != nil {
+		return err
+	}
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("failed to close writer: %w", err)
+	}
+
+	return nil
+
 }
 
 func NewGoogleCloudStorage() (*GoogleCloudStorage, error) {
@@ -166,4 +203,29 @@ func NewGoogleCloudStorage() (*GoogleCloudStorage, error) {
 	}
 
 	return &GoogleCloudStorage{bktName}, nil
+}
+
+func splitImageName(name string) (namePart string, formatPart string, err error) {
+	re := regexp.MustCompile(`^(.+)\.([^.]+)$`)
+
+	matches := re.FindStringSubmatch(name)
+	if len(matches) != 3 {
+		return "", "", fmt.Errorf("invalid image name: %s", name)
+	}
+
+	return matches[1], matches[2], nil
+}
+
+func writeImage(w io.Writer, img *image.RGBA, imgFormat string) error {
+	switch imgFormat {
+	case "jpg", "jpeg":
+		if err := jpeg.Encode(w, img, nil); err != nil {
+			return fmt.Errorf("failed to write image: %w", err)
+		}
+	case "png":
+		if err := png.Encode(w, img); err != nil {
+			return fmt.Errorf("failed to write image: %w", err)
+		}
+	}
+	return nil
 }
