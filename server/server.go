@@ -78,13 +78,15 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, storage.ErrObjectNotExist):
 		// if processed one doesn't exist, we have to get original image from storage
 		rc, err = s.storage.GetImageReader(r.Context(), imgName)
-		if err != nil {
-			statusCode := http.StatusInternalServerError
-			if errors.Is(err, storage.ErrObjectNotExist) {
-				statusCode = http.StatusNotFound
-			}
-			http.Error(rw, err.Error(), statusCode)
+		switch {
+		case errors.Is(err, storage.ErrObjectNotExist):
+			http.Error(rw, fmt.Sprintf("image %s not found: %v", imgName, err), http.StatusNotFound)
 			return
+		case err != nil:
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return
+		case err == nil:
+			// do nothing
 		}
 		defer rc.Close()
 		// create gato.Data
