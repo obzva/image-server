@@ -123,8 +123,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		}
 
 		// if saveNewOne is true, save processed image to storage
-		saveName := fmt.Sprintf("processed/%s-w%d-h%d.%s", imgNamePart, w, h, imgFormatPart)
-		if err := s.storage.SaveImage(r.Context(), saveName, dstImg); err != nil {
+		if err := s.storage.SaveImage(r.Context(), processedImgName, dstImg); err != nil {
 			http.Error(rw, err.Error(), http.StatusInternalServerError)
 			return
 		}
