@@ -86,7 +86,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			http.Error(rw, err.Error(), http.StatusInternalServerError)
 			return
 		case err == nil:
-			// do nothing
+			// do nothing...
 		}
 		defer rc.Close()
 		// create gato.Data
