@@ -10,47 +10,48 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/smithy-go"
 	"github.com/disintegration/gift"
 	"github.com/obzva/image-server/internal/envvar"
+	"github.com/obzva/image-server/internal/storage"
 )
 
 const (
-	originalFolder = "original"
-	resizedFolder  = "resized"
+	errStrInvalidImagePath = "invalid image path"
 
-	widthQuery  = "w"
-	heightQuery = "h"
+	queryWidth  = "w"
+	queryHeight = "h"
 )
 
-func getImageHandler(logger *slog.Logger, s3Client *s3.Client, envVar *envvar.EnvVar) func(w http.ResponseWriter, r *http.Request) {
+var (
+	imagePathRegex = regexp.MustCompile(`^[^/]+\.(jpeg|jpg|png)$`)
+)
+
+func handler(logger *slog.Logger, storageClient storage.Client, envVar *envvar.EnvVar) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		imageName := r.PathValue("imageName")
-		if imageName == "" {
-			http.Error(w, "image name is required", http.StatusBadRequest)
+		// check image path
+		path := r.PathValue(slug)
+		if !imagePathRegex.MatchString(path) {
+			http.Error(w, errStrInvalidImagePath, http.StatusBadRequest)
 			return
 		}
+		splitPath := strings.Split(path, ".")
+		imageName := splitPath[0]
+		imageFormat := splitPath[1]
+
 		// check if this image exists
-		originalKey := filepath.Join(originalFolder, imageName)
-		_, err := s3Client.HeadObject(r.Context(), &s3.HeadObjectInput{
-			Bucket: aws.String(envVar.BucketName),
-			Key:    aws.String(originalKey),
-		})
+		originalKey := filepath.Join(envVar.FolderOriginal, path)
+		originalOK, err := storageClient.CheckObject(r.Context(), originalKey)
 		if err != nil {
-			var ae smithy.APIError
-			if errors.As(err, &ae) {
-				if ae.ErrorCode() == "NotFound" {
-					http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
-					return
-				}
-			}
 			logger.Error(err.Error())
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		if !originalOK {
+			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 			return
 		}
 
@@ -59,8 +60,8 @@ func getImageHandler(logger *slog.Logger, s3Client *s3.Client, envVar *envvar.En
 
 		// check query params: w & h
 		q := r.URL.Query()
-		if q.Has(widthQuery) {
-			qWidth, err := strconv.Atoi(q.Get(widthQuery))
+		if q.Has(queryWidth) {
+			qWidth, err := strconv.Atoi(q.Get(queryWidth))
 			if err != nil {
 				http.Error(w, "failed converting w into integer", http.StatusBadRequest)
 				return
@@ -71,8 +72,8 @@ func getImageHandler(logger *slog.Logger, s3Client *s3.Client, envVar *envvar.En
 			}
 			width = qWidth
 		}
-		if q.Has(heightQuery) {
-			qHeight, err := strconv.Atoi(q.Get(heightQuery))
+		if q.Has(queryHeight) {
+			qHeight, err := strconv.Atoi(q.Get(queryHeight))
 			if err != nil {
 				http.Error(w, "failed converting h into integer", http.StatusBadRequest)
 				return
@@ -86,64 +87,45 @@ func getImageHandler(logger *slog.Logger, s3Client *s3.Client, envVar *envvar.En
 
 		// if they are requesting original image then redirect to S3 object URL
 		if width == 0 && height == 0 {
-			s3URL := fmt.Sprintf("https://%s.s3.ca-west-1.amazonaws.com/%s", envVar.BucketName, originalKey)
-			http.Redirect(w, r, s3URL, http.StatusFound)
+			http.Redirect(w, r, storageClient.ObjectURL(originalKey), http.StatusSeeOther)
 			return
 		}
 
 		// check if resized image already exists
-		resizedExists := true
-		splittedImageName := strings.Split(imageName, ".")
-		resizedKey := filepath.Join(resizedFolder, splittedImageName[0], fmt.Sprintf("w%dh%d.%s", width, height, splittedImageName[1]))
-		_, err = s3Client.HeadObject(r.Context(), &s3.HeadObjectInput{
-			Bucket: aws.String(envVar.BucketName),
-			Key:    aws.String(resizedKey),
-		})
+		resizedKey := filepath.Join(envVar.FolderResized, imageName, fmt.Sprintf("w%dh%d.%s", width, height, imageFormat))
+		resizedOK, err := storageClient.CheckObject(r.Context(), resizedKey)
 		if err != nil {
-			var ae smithy.APIError
-			if errors.As(err, &ae) && ae.ErrorCode() == "NotFound" {
-				resizedExists = false
-			} else {
-				logger.Error(err.Error())
-				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-				return
-			}
+			logger.Error(err.Error())
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
 		}
 
 		// if resized image already exists
-		if resizedExists {
-			s3URL := fmt.Sprintf("https://%s.s3.ca-west-1.amazonaws.com/%s", envVar.BucketName, resizedKey)
-			http.Redirect(w, r, s3URL, http.StatusFound)
+		if resizedOK {
+			http.Redirect(w, r, storageClient.ObjectURL(resizedKey), http.StatusSeeOther)
 			return
 		}
 
 		// else, let's resize it and upload it
-
 		// first download the original image
-		originalObject, err := s3Client.GetObject(r.Context(), &s3.GetObjectInput{
-			Bucket: aws.String(envVar.BucketName),
-			Key:    aws.String(originalKey),
-		})
+		body, contentType, err := storageClient.DownloadObject(r.Context(), originalKey)
 		if err != nil {
-			var ae smithy.APIError
-			if errors.As(err, &ae) {
-				switch ae.ErrorCode() {
-				case "NotFound":
-					http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
-					return
-				case "InvalidObjectState":
-					http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
-					return
-				}
+			if errors.Is(err, storage.ErrNotFound) {
+				http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, storage.ErrForbidden) {
+				http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+				return
 			}
 			logger.Error(err.Error())
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
-		defer originalObject.Body.Close()
+		defer body.Close()
 
 		// make it image.Image
-		src, format, err := image.Decode(originalObject.Body)
+		src, format, err := image.Decode(body)
 		if err != nil {
 			logger.Error(err.Error())
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -173,16 +155,10 @@ func getImageHandler(logger *slog.Logger, s3Client *s3.Client, envVar *envvar.En
 		}
 
 		// upload resized image
-		_, err = s3Client.PutObject(r.Context(), &s3.PutObjectInput{
-			Bucket:      aws.String(envVar.BucketName),
-			Key:         aws.String(resizedKey),
-			Body:        &buf,
-			ContentType: originalObject.ContentType,
-		})
+		err = storageClient.UploadObject(r.Context(), resizedKey, &buf, contentType)
 		if err != nil {
-			var ae smithy.APIError
-			if errors.As(err, &ae) && ae.ErrorCode() == "EntityTooLarge" {
-				http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
+			if errors.Is(err, storage.ErrBadRequest) {
+				http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 				return
 			}
 			logger.Error(err.Error())
@@ -191,7 +167,6 @@ func getImageHandler(logger *slog.Logger, s3Client *s3.Client, envVar *envvar.En
 		}
 
 		// redirect to the new resized image
-		s3URL := fmt.Sprintf("https://%s.s3.ca-west-1.amazonaws.com/%s", envVar.BucketName, resizedKey)
-		http.Redirect(w, r, s3URL, http.StatusFound)
+		http.Redirect(w, r, storageClient.ObjectURL(resizedKey), http.StatusSeeOther)
 	}
 }

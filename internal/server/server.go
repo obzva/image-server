@@ -1,17 +1,20 @@
 package server
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/obzva/image-server/internal/envvar"
+	"github.com/obzva/image-server/internal/storage"
 )
 
-func New(logger *slog.Logger, s3Client *s3.Client, envVar *envvar.EnvVar) http.Handler {
+const slug = "image"
+
+func New(logger *slog.Logger, storageClient storage.Client, envVar *envvar.EnvVar) http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /{imageName}", getImageHandler(logger, s3Client, envVar))
+	mux.HandleFunc(fmt.Sprintf("GET /{%s}", slug), handler(logger, storageClient, envVar))
 
 	return mux
 }

@@ -11,15 +11,18 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		AddSource: true,
+		Level:     slog.LevelDebug,
+	}))
 
-	s3Client, err := storage.NewS3Client()
+	envVar, err := envvar.New()
 	if err != nil {
 		logger.Error(err.Error())
 		os.Exit(1)
 	}
 
-	envVar, err := envvar.New()
+	s3Client, err := storage.NewS3Client(envVar.BucketName)
 	if err != nil {
 		logger.Error(err.Error())
 		os.Exit(1)
